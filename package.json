@@ -1,6 +1,7 @@
 {
-   "name": "manage_pdv_api",
-   "version": "1.0.0",
+   "name": "polly",
+   "version": "0.0.1",
+   "author": "Thiago Silva",
    "license": "MIT",
    "type": "commonjs",
    "devDependencies": {
