@@ -5,10 +5,17 @@ import { PoolManager } from "./manager";
 export class Polly {
     protected pool: PoolManager;
     protected client: PoolClient | null
+    protected autoRelease: boolean
+    protected inTransaction: boolean
 
-    constructor(pool: PoolManager) {
-        this.pool = pool;
+    constructor(config: {
+        pool: PoolManager,
+        autoRelease?: boolean
+    }) {
+        this.pool = config.pool;
         this.client = null;
+        this.autoRelease = config.autoRelease !== false;
+        this.inTransaction = false;
     }
 
     protected async getClient(): Promise<PoolClient> {
@@ -24,14 +31,35 @@ export class Polly {
         try {
             return client.query(query, params);
         } catch(err) {
+            if (this.inTransaction) {
+                client.query('ROLLBACK');
+                this.inTransaction = false;
+            }
             this.free();
+
             throw err;
+        } finally {
+            if (this.autoRelease && !this.inTransaction) {
+                this.free();
+            }
         };
+    }
+
+    public async startTransaction() {
+        this.inTransaction = true;
+        await this.execute('BEGIN');
+    }
+
+    public async commit() {
+        if (this.inTransaction) {
+            this.inTransaction = false;
+            await this.execute('COMMIT');
+        }
     }
 
     public free() {
         if (this.client) {
-            this.pool.release(this.client);
+            this.client.release();
             this.client = null;
         }
     }
@@ -81,7 +109,7 @@ export class Polly {
         orderByDesc?: boolean,
     }) {
         return (await this.execute(`
-            ${config.query.replace(';', '')}
+            ${config.query}
             ${!!config.orderBy ? `ORDER BY ${config.orderBy} ${config.orderByDesc ? 'DESC' : ''}` : ''}
             ${!!config.limit ? `LIMIT ${config.limit}`: ''}
             ${!!config.skip ? `OFFSET ${config.skip}` : ''}
