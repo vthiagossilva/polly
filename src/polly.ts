@@ -109,7 +109,7 @@ export class Polly {
         orderByDesc?: boolean,
     }) {
         return (await this.execute(`
-            ${config.query}
+            ${config.query.replace(';', '')}
             ${!!config.orderBy ? `ORDER BY ${config.orderBy} ${config.orderByDesc ? 'DESC' : ''}` : ''}
             ${!!config.limit ? `LIMIT ${config.limit}`: ''}
             ${!!config.skip ? `OFFSET ${config.skip}` : ''}
@@ -125,7 +125,7 @@ export class Polly {
         const sql = `
             INSERT INTO ${config.table}
                 (${_fields.join(',')})
-                VALUES (${_values.join(',')})${config.getID ? ' RETURNING id' : ''};`
+                VALUES ${_values}${config.getID ? ' RETURNING id' : ''};`;
         const result = await this.execute(sql);
         if (config.getID && result.rows.length === 1) {
             return result.rows[0].id;
@@ -138,7 +138,7 @@ export class Polly {
         where: string | null,
         params?: QueryParams,
     }) {
-        const [ fields, _data ] = Polly.getData(config.data);
+        const [ fields, _data ] = Polly.getData(config.data, true);
     
         const sql = `UPDATE ${config.table}
             SET ${fields.map((f, i) => `${f} = ${_data[i]}`)}
@@ -158,7 +158,7 @@ export class Polly {
         await this.execute(sql,config.params);
     }
 
-    public static getData(data: any) {
+    public static getData(data: any, asArray: boolean = false) {
         const converter = (o: any) => {
             if (typeof o === 'object') {
                 return Object.prototype.toString.call(o) === '[object Date]' ? 
@@ -181,7 +181,7 @@ export class Polly {
                     }
                 }
             }
-            return [ _fields, _data ];
+            return [ _fields, asArray ? _data : `(${_data.join(',')})` ];
         }
 
         for (let item of data) {
@@ -199,7 +199,7 @@ export class Polly {
                     _value.push(`'${value}'`);
                 }
             }
-            _data.push(_value);
+            _data.push(`(${_value.join(',')})`);
         }
         return [ _fields, _data ];
     }    
