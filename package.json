@@ -1,6 +1,6 @@
 {
    "name": "oneci-polly",
-   "version": "0.0.8",
+   "version": "0.0.9",
    "author": "Thiago Silva",
    "main": "dist/index.js",
    "license": "MIT",
