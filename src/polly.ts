@@ -1,4 +1,5 @@
 import { PoolClient, QueryConfig } from "pg";
+import { Converters } from "./converters";
 import { PoolManager } from "./manager";
 
 
@@ -7,15 +8,18 @@ export class Polly {
     protected client: PoolClient | null
     protected autoRelease: boolean
     protected inTransaction: boolean
+    protected useCamelConverter: boolean;
 
     constructor(config: {
         pool: PoolManager,
-        autoRelease?: boolean
+        autoRelease?: boolean,
+        useCamelConverter?: boolean,
     }) {
         this.pool = config.pool;
         this.client = null;
         this.autoRelease = config.autoRelease !== false;
         this.inTransaction = false;
+        this.useCamelConverter = config.useCamelConverter ?? false;
     }
 
     protected async getClient(): Promise<PoolClient> {
@@ -29,11 +33,21 @@ export class Polly {
         const client = await this.getClient();
 
         try {
+            if (this.pool.logQueries) {
+                console.log((query as string).trim());
+                console.log(params);
+            }
             return client.query(query, params);
         } catch(err) {
             if (this.inTransaction) {
+                if (this.pool.logQueries) {
+                    console.log('Making ROLLBACK...');
+                };
                 client.query('ROLLBACK');
                 this.inTransaction = false;
+                if (this.pool.logQueries) {
+                    console.log('ROLLBACK done.');
+                };
             }
             this.free();
 
@@ -57,11 +71,42 @@ export class Polly {
         }
     }
 
+    public async rollback() {
+        if (this.inTransaction) {
+            this.inTransaction = false;
+            await this.execute('ROLLBACK');
+        }
+    }
+
     public free() {
         if (this.client) {
             this.client.release();
             this.client = null;
         }
+    }
+
+    public async countById(config: {
+        table: string,
+        id:string | number,
+    }): Promise<number> {
+        const result = await this.select({
+            query: `
+                SELECT COUNT('id') as count FROM ${config.table}
+                WHERE id = $1
+            `,
+            params: [config.id],
+        });
+        return parseInt(result[0].count);
+    };
+
+    public async isEmpty(config: {
+        table: string,
+        where?: string,
+        pk?: string,
+        params?: QueryParams
+    }): Promise<boolean> {
+        const result = await this.count(config);
+        return result === 0;
     }
 
     public async count(config: {
@@ -77,7 +122,7 @@ export class Polly {
             `,
             params: config.params,
         });
-        return result[0].count;
+        return parseInt(result[0].count);
     };
 
     public async getOne(config: {
@@ -108,12 +153,16 @@ export class Polly {
         orderBy?: string,
         orderByDesc?: boolean,
     }) {
-        return (await this.execute(`
+        const result = (await this.execute(`
             ${config.query.replace(';', '')}
             ${!!config.orderBy ? `ORDER BY ${config.orderBy} ${config.orderByDesc ? 'DESC' : ''}` : ''}
             ${!!config.limit ? `LIMIT ${config.limit}`: ''}
             ${!!config.skip ? `OFFSET ${config.skip}` : ''}
         `, config.params)).rows;
+        if (this.useCamelConverter) {
+            return Converters.keysToCamel(result);
+        }
+        return result;
     };
 
     public async insert(config: {
@@ -121,7 +170,11 @@ export class Polly {
         data: object | object[],
         getID?: boolean,
     }) {
-        const [ _fields, _values ] = Polly.getData(config.data);
+        const [ _fields, _values ] = Polly.getData(
+            config.data,
+            undefined,
+            this.useCamelConverter,
+        );
         const sql = `
             INSERT INTO ${config.table}
                 (${_fields.join(',')})
@@ -138,7 +191,11 @@ export class Polly {
         where: string | null,
         params?: QueryParams,
     }) {
-        const [ fields, _data ] = Polly.getData(config.data, true);
+        const [ fields, _data ] = Polly.getData(
+            config.data,
+            true,
+            this.useCamelConverter,
+        );
     
         const sql = `UPDATE ${config.table}
             SET ${fields.map((f, i) => `${f} = ${_data[i]}`)}
@@ -158,21 +215,37 @@ export class Polly {
         await this.execute(sql,config.params);
     }
 
-    public static getData(data: any, asArray: boolean = false) {
+    public static getData(
+        data: any,
+        asArray: boolean = false,
+        useCamelConverter: boolean,
+    ) {
         const converter = (o: any) => {
             if (typeof o === 'object') {
-                return Object.prototype.toString.call(o) === '[object Date]' ? 
-                    o.toISOString() : JSON.stringify(o);
+                if (Object.prototype.toString.call(o) === '[object Date]') {
+                    const tzoffset = o.getTimezoneOffset() * 60000;
+                    const localISOTime = (new Date(o.valueOf() - tzoffset)).toISOString().slice(0, -1);
+                    return localISOTime;
+                } 
+                return JSON.stringify(o);
             } else if (o === null) {return o};
             return o.toString().replace(/'/g, "''");
         }
 
-        let _fields: string[] = [];
-        const _data: any[] = [];
+        let _fields: any = [];
+        const _data: any = [];
         if (!(Object.prototype.toString.call(data) === '[object Array]')) {
             for (let par of Object.keys(data)) {
                 if (data[par] !== undefined) {
-                    _fields.push(`"${par.toLowerCase()}"`);
+                    let _formatedField = par;
+                    if (useCamelConverter) {
+                        _formatedField = Converters.camelToSnakeCase(
+                            _formatedField
+                        );
+                    } else {
+                        _formatedField = _formatedField.toLowerCase();
+                    }
+                    _fields.push(`"${_formatedField}"`);
                     const value = converter(data[par]);
                     if (data[par] === null) {
                         _data.push('null');
@@ -189,9 +262,25 @@ export class Polly {
 
             for (let par of Object.keys(item)) {
                 if (_fields.length < Object.keys(item).length) {
-                    _fields = Object.keys(item).map(a => `"${a.toLowerCase()}"`);
+                    _fields = Object.keys(item).map(a => {
+                        let _formatedField = a;
+                        if (useCamelConverter) {
+                            _formatedField = Converters.camelToSnakeCase(
+                                _formatedField
+                            );
+                        } else {
+                            _formatedField = _formatedField.toLowerCase();
+                        }
+                        return `"${_formatedField}"`;
+                    });
                 }
-                const value = converter(item[par]);
+                
+                let value: any;
+                if (item[par] === undefined || item[par] === null) {
+                    value = null
+                } else {
+                    value = converter(item[par]);
+                };
                 
                 if (value === null) {
                     _value.push('null');
