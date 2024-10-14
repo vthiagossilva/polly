@@ -1,6 +1,6 @@
 {
    "name": "oneci-polly",
-   "version": "1.2.0",
+   "version": "1.2.1",
    "author": "Thiago Silva",
    "main": "dist/index.js",
    "license": "MIT",
@@ -19,6 +19,7 @@
    },
    "scripts": {
       "test": "ts-node-dev --transpile-only src/test.ts",
+      "test-build": "node --env-file .env dist/src/test",
       "build": "tsc --declaration"
    }
 }
