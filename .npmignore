@@ -3,3 +3,4 @@ yarn.lock
 .git
 .git/
 .gitignore
+.env

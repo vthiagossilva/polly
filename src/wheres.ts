@@ -8,6 +8,8 @@ export class Where {
     public static MORE_THAN = '>';
     public static LESS_THAN = '<';
     public static EQUAL = '=';
+    public static ILIKE = 'ILIKE';
+    public static LIKE = 'LIKE';
 
     public static fields(value: string[]): string {
         return value.map(v => (v === '*' || Boolean(v.split(' ').length > 1 || v.split('.').length > 1)) ? v : `"${Converters.camelToSnakeCase(v)}"`).join(', ');
@@ -60,6 +62,7 @@ export class Where {
         interOp?: string,
         useParams?: boolean,
         startCounting?: number,
+        withoutQuote?: boolean,
     }) {
         let where = '';
         let i = config?.startCounting ?? 1;
@@ -121,7 +124,8 @@ export class Where {
                 } else if (group.value instanceof Array) {
                     where += ` IN (${(group.value as Array<JsonTypes>).map(a => `'${a}'`).join(',')})`;
                 } else {
-                    where += group.bin ?? Where.EQUAL;
+                    const bin = group.bin ?? Where.EQUAL;
+                    where += bin;
                     if (
                         [Where.MORE_THAN, Where.LESS_THAN].includes(group.bin as string) &&
                         group.allowEqual
@@ -130,10 +134,19 @@ export class Where {
                     }
 
                     if (config?.useParams === false) {
-                        where += ` ${group.value}`;
+                        where += ` ${[Where.ILIKE, Where.LIKE].includes(bin) ?
+                            `'%${group.value}%'` :
+                            (config.withoutQuote ?
+                                group.value :
+                                `'${group.value}'`
+                            )}`;
                     } else {
                         where += ` $${i}`;
-                        params.push(group.value);
+                        params.push(
+                            [Where.ILIKE, Where.LIKE].includes(bin) ?
+                            `'%${group.value}%'` :
+                            group.value
+                        );
                     }
 
                     if (group.alsoNull) {

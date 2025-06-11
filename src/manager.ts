@@ -7,7 +7,7 @@ export class PoolManager {
 
     constructor(config: PoolConfig) {
         this.pool = new Pool(config);
-        this.logQueries = !!process.env.LOG_QUERIES;
+        this.logQueries = config.logQueries ?? false;
     }
 
     public async onReady(executor: () => void) {

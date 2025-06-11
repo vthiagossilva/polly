@@ -11,7 +11,7 @@ class _Select {
     private whereClause?: string;
     private limitValue?: number;
     private offsetValue: number;
-    private paramsClause?: any[];
+    public paramsClause?: any[];
     private orderBy?: string;
     private groupBy?: string;
     private isDistinct: boolean;
@@ -58,6 +58,7 @@ class _Select {
             data.predicate
         ], {
             useParams: false,
+            withoutQuote: true,
         });
         if (!this.joinsClause) {
             this.joinsClause = '';
@@ -193,6 +194,14 @@ class _Select {
         this.fieldsList = oldFields;
         return parseInt(r.total);
     }
+
+    public async sum(field: string, executor?: Polly) {
+        const oldFields = this.fieldsList;
+        this.fieldsList = `SUM(${Converters.camelToSnakeCase(field)}) total`;
+        const r = await this.one(executor);
+        this.fieldsList = oldFields;
+        return Number(r.total);
+    }
 }
 
 export const JOIN = {
@@ -207,11 +216,13 @@ export const ORDER = {
     ASC: 'ASC'
 }
 
+export type TSelect = InstanceType<typeof _Select>;
+
 export const Select = (
     from?: string,
     fields?: string[],
     polly?: Polly,
-) => new _Select({
+): TSelect => new _Select({
     fields,
     from,
     polly,

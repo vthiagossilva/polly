@@ -1,25 +1,40 @@
 import { PoolClient, QueryConfig } from "pg";
 import { Converters } from "./converters";
 import { PoolManager } from "./manager";
+import { Where } from "./wheres";
 
 
 export class Polly {
     protected pool: PoolManager;
     protected client: PoolClient | null
     protected autoRelease: boolean
-    protected inTransaction: boolean
+    public inTransaction: boolean
     protected useCamelConverter: boolean;
+    protected oneEngine?: {
+        info: (message: any) => void
+    };
+    protected logs: string[];
+    dryRun: boolean;
 
     constructor(config: {
         pool: PoolManager,
         autoRelease?: boolean,
         useCamelConverter?: boolean,
+        engine?: any,
+        dryRun?: boolean,
     }) {
         this.pool = config.pool;
         this.client = null;
         this.autoRelease = config.autoRelease !== false;
         this.inTransaction = false;
         this.useCamelConverter = config.useCamelConverter ?? false;
+        this.oneEngine = config.engine;
+        this.logs = [];
+        this.dryRun = config.dryRun ?? false;
+    }
+
+    public getLogs() {
+        return this.logs;
     }
 
     protected async getClient(): Promise<PoolClient> {
@@ -29,25 +44,38 @@ export class Polly {
         return this.client;
     }
 
-    protected async execute(query: string | QueryConfig, params?: any) {
+    private async execute(query: string | QueryConfig, params?: any) {
+        const parsedQuery = String(query)
+            .replace(/[\r\n]+/g, '')
+            .replace(/\s+/g, ' ').trim();
+        let log = parsedQuery;
+        if (params) {
+            log += ` - [ ${params} ]`;
+        }
+        
+        if (this.pool.logQueries) {
+            if (this.oneEngine) {
+                this.oneEngine.info(log);
+            } else {
+                console.info(log);
+            }
+        }
+        this.logs.push(log);
+
+        if (!this.dryRun) {
+            return this.execute(parsedQuery, params);
+        }
+    }
+
+    public async _execute(query: string | QueryConfig, params?: any) {
         const client = await this.getClient();
 
         try {
-            if (this.pool.logQueries) {
-                console.log((query as string).trim());
-                console.log(params);
-            }
             return client.query(query, params);
         } catch(err) {
             if (this.inTransaction) {
-                if (this.pool.logQueries) {
-                    console.log('Making ROLLBACK...');
-                };
-                client.query('ROLLBACK');
+                await this.execute('ROLLBACK');
                 this.inTransaction = false;
-                if (this.pool.logQueries) {
-                    console.log('ROLLBACK done.');
-                };
             }
             this.free();
 
@@ -60,8 +88,10 @@ export class Polly {
     }
 
     public async startTransaction() {
-        this.inTransaction = true;
-        await this.execute('BEGIN');
+        if (!this.inTransaction) {
+            this.inTransaction = true;
+            await this.execute('BEGIN');
+        }
     }
 
     public async commit() {
@@ -125,6 +155,22 @@ export class Polly {
         return parseInt(result[0].count);
     };
 
+    public async sum(config: {
+        table: string,
+        where?: string,
+        pk?: string,
+        params?: QueryParams
+    }): Promise<number> {
+        const result = await this.select({
+            query: `
+                SELECT SUM(${config.pk ?? 'id'}) as value FROM ${config.table}
+                ${config.where ? `WHERE ${config.where}` : ''};
+            `,
+            params: config.params,
+        });
+        return parseInt(result[0].value);
+    };
+
     public async getOne(config: {
         query: string,
         params?: QueryParams,
@@ -143,6 +189,17 @@ export class Polly {
             return result[0];
         }
         return null;
+    }
+
+    public whereById(id: number | string, field?: string) {
+        const [where, params] = Where.basicAnd({
+            [field ?? `id`]: id,
+        });
+
+        return {
+            where,
+            params,
+        }
     }
 
     public async select(config: {
@@ -170,31 +227,51 @@ export class Polly {
         data: object | object[],
         getID?: boolean,
     }) {
+        if (config.data instanceof Array) {
+            if (config.data.length === 0) {
+                return;
+            }
+        }
+
         const [ _fields, _values ] = Polly.getData(
             config.data,
             undefined,
             this.useCamelConverter,
+            false,
         );
         const sql = `
             INSERT INTO ${config.table}
                 (${_fields.join(',')})
                 VALUES ${_values}${config.getID ? ' RETURNING id' : ''};`;
         const result = await this.execute(sql);
-        if (config.getID && result.rows.length === 1) {
-            return result.rows[0].id;
+        if (config.getID && result?.rows.length === 1) {
+            return result?.rows[0].id;
         }
     }
 
     public async update(config: {
         table: string,
         data: object,
-        where: string | null,
+        whereById?: number | string,
+        where?: string | null,
         params?: QueryParams,
+        allowAtom?: boolean,
     }) {
+        if (config.where === undefined && !config.whereById) {
+            throw new Error('Envie where ou whereById');
+        }
+
+        if (config.whereById) {
+            const { where, params } = this.whereById(config.whereById);
+            config.where = where;
+            config.params = params;
+        }
+
         const [ fields, _data ] = Polly.getData(
             config.data,
             true,
             this.useCamelConverter,
+            config.allowAtom ?? false,
         );
     
         const sql = `UPDATE ${config.table}
@@ -206,9 +283,20 @@ export class Polly {
 
     public async delete(config: {
         table: string,
-        where: string | null,
+        where?: string | null,
+        whereById?: string | number,
         params?: QueryParams,
     }) {
+        if (config.where === undefined && !config.whereById) {
+            throw new Error('Envie where ou whereById');
+        }
+
+        if (config.whereById) {
+            const { where, params } = this.whereById(config.whereById);
+            config.where = where;
+            config.params = params;
+        }
+
         const sql = `DELETE FROM ${config.table}
             ${config.where ? `WHERE ${config.where}` : ''};`;
         
@@ -219,6 +307,7 @@ export class Polly {
         data: any,
         asArray: boolean = false,
         useCamelConverter: boolean,
+        allowAtom: boolean,
     ) {
         const converter = (o: any) => {
             if (typeof o === 'object') {
@@ -247,8 +336,11 @@ export class Polly {
                     }
                     _fields.push(`"${_formatedField}"`);
                     const value = converter(data[par]);
+
                     if (data[par] === null) {
                         _data.push('null');
+                    } else if (allowAtom && (value as string).substring(0, 5) === 'atom(') {
+                        _data.push(`"${_formatedField}" ${(value as string).slice(5, value.length - 1)}`);
                     } else {
                         _data.push(`'${value}'`);
                     }
@@ -293,5 +385,21 @@ export class Polly {
         return [ _fields, _data ];
     }    
 };
+
+export const atomic = (value?: number, op?: '*' | '*') => {
+    if (!value || value === 0) {
+        return;
+    }
+
+    let operation = op ?? '+';
+    let completeValue = `${operation} ${value}`;
+    if (value < 0 && !op) {
+        completeValue = `${value}`;
+    } else if (value < 0 && op) {
+        completeValue = `${op} (${value})`;
+    }
+
+    return `atom(${completeValue})`;
+}
 
 export type QueryParams = (string | number | object | boolean)[];
